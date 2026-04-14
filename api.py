@@ -36,7 +36,7 @@ class FetchRequest(BaseModel):
 class FetchedFile(BaseModel):
     name: str
     path: str
-    content_base64: str
+    content: str        # plain text file content
     size: int
     url: str
 
@@ -46,14 +46,14 @@ class FetchResponse(BaseModel):
 class CommitRequest(BaseModel):
     repo: str           = "owner/repo"
     remote_path: str    = "src/new_file.py"
-    content_base64: str = "<base64-encoded file content>"
+    content: str        = "plain text file content"
     message: str        = "add file via git-tool API"
     branch: str         = "main"
     platform: Platform  = "github"
 
     model_config = {"json_schema_extra": {"example": {
         "repo": "octocat/Hello-World", "remote_path": "src/hello.py",
-        "content_base64": "cHJpbnQoJ2hlbGxvJyk=",
+        "content": "print('hello')",
         "message": "add hello.py", "branch": "main", "platform": "github"
     }}}
 
@@ -88,10 +88,11 @@ def _gh_fetch_recursive(repo, path, ref, hdrs) -> list[FetchedFile]:
             if item["type"] == "file":
                 files.extend(_gh_fetch_recursive(repo, item["path"], ref, hdrs))
         return files
+    raw = base64.b64decode(data["content"].replace("\n", "")).decode("utf-8", errors="replace")
     return [FetchedFile(
         name=os.path.basename(data["path"]),
         path=data["path"],
-        content_base64=data["content"].replace("\n", ""),
+        content=raw,
         size=data["size"],
         url=data["html_url"],
     )]
@@ -104,10 +105,11 @@ def _gl_fetch(repo, path, ref, hdrs) -> list[FetchedFile]:
     data, status = api(url, hdrs=hdrs)
     if status != 200:
         raise HTTPException(status, detail=data.get("message", str(data)))
+    raw = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
     return [FetchedFile(
         name=os.path.basename(path),
         path=path,
-        content_base64=data["content"],
+        content=raw,
         size=len(base64.b64decode(data["content"])),
         url=f"{base}/{repo}/-/blob/{ref}/{path}",
     )]
@@ -163,7 +165,7 @@ def fetch_raw(
     if not files:
         raise HTTPException(404, "no file found at that path")
     f = files[0]
-    content = base64.b64decode(f.content_base64)
+    content = f.content.encode("utf-8")
     return Response(
         content=content,
         media_type="application/octet-stream",
@@ -183,14 +185,14 @@ def commit(
 ):
     """
     Create or update a file at `remote_path` in the given repo and branch.
-    File content must be **base64-encoded**.
+    Pass file content as plain text in the `content` field.
 
     - Creates the file if it doesn't exist
     - Updates (overwrites) if it already exists
     - No local git clone required — the API call is the commit+push
     """
     hdrs = _token_headers(body.platform, x_token)
-    content = body.content_base64
+    content = base64.b64encode(body.content.encode("utf-8")).decode()
 
     if body.platform == "github":
         url = f"https://api.github.com/repos/{body.repo}/contents/{body.remote_path}"
